@@ -10,16 +10,26 @@ with chroma subsampling up to 2, not RGB. Fork of dubhater's plugin, ported to A
 
 - `src/awarpsharp2.cpp`: C++ template kernels (`sobel_c`, `blur_r6_c`, `blur_r2_c`,
   `bilinear_downscale_*_c`, `warp_c<SMAGL, PixelType>`) followed by the API 4 glue (one
-  `AWarpSharp2Data` struct for all four filters, `selectFunctions()` picks C or SSE2 kernels).
+  `AWarpSharp2Data` struct for all four filters, `selectFunctions()` picks C, SSE2 or NEON kernels).
 - `src/sse2.cpp`: SSE2 kernels (sobel/blur for 8 and 16 bit, warp for 8 bit only). Compiled only
-  on x86 (`AWARPSHARP2_X86`, set by `meson.build`); `opt=False` or any other CPU (arm64) uses the
-  C kernels, which give bit-identical results. The pixel code is unchanged from upstream.
+  on x86 (`AWARPSHARP2_X86`, set by `meson.build`).
+- `src/neon.cpp`: the same kernels for AArch64 (`AWARPSHARP2_ARM`), a lane-by-lane port of the
+  SSE2 code (`Vec<PixelType>` traits for the 8/16 bit vector ops; the warp gathers its source
+  pixels with scalar loads). Same loop bounds and edge handling as the SSE2 code, so the two can
+  be compared line by line; a fix in one belongs in the other.
+- `src/warp_edge.h`: scalar warp of one pixel (`warp_edge_c`), used by both SIMD files for the
+  first and last pixel of every row.
+- `opt=False` or any other CPU uses the C kernels; all three give bit-identical results. The SIMD
+  kernels assume plane widths of at least 16 pixels (8 bit) like upstream; the pixel arithmetic is
+  unchanged from upstream, only the position of the last vector per row was fixed (it started
+  inside the left edge for narrow planes, and the warp wrote one byte past the row).
 - Algorithm quirks that are upstream behaviour, not bugs: the last row of a warped plane is always
   interpolated with the row above (vertical limit for the last row is -1), so `depth=0` is not an
   exact identity there; AWarp with a 4x clip leaves unprocessed planes uninitialised.
 - `include/vapoursynth/`: vendored R55 API 4 headers, used when pkg-config finds no `vapoursynth`.
 - `test/test_awarpsharp2.py`: functional tests (SHA-256 references for every function in 8, 10
-  and 16 bit; each case must agree between `opt=True` and `opt=False`; argument errors).
+  and 16 bit, including 36 and 44 pixel wide clips whose chroma hits the last-vector cases; each
+  case must agree between `opt=True` and `opt=False`; argument errors).
   Run with `python test/test_awarpsharp2.py build/awarpsharp2.dll`, or without the path when the
   wheel is installed. Changing pixel output changes the digests: regenerate them deliberately
   (set an entry to `None`, the test prints the new value).
@@ -33,6 +43,10 @@ with chroma subsampling up to 2, not RGB. Fork of dubhater's plugin, ported to A
   runtime), Linux x86_64 (manylinux_2_28) and macOS arm64 with cibuildwheel, re-tags them
   `py3-none`, and attaches them to a GitHub release for `v*` tags. Only CI builds Linux and macOS;
   locally only the Windows build is checked.
+- Checking SIMD against C without VapourSynth: a small harness that `#include`s `awarpsharp2.cpp`
+  (the C kernels are `static` there) and calls the `*_neon`/`*_sse2` functions on random planes
+  of many widths, heights and strides, comparing the pixels inside the plane. On an arm64 Mac the
+  SSE2 kernels can be built with `clang++ -arch x86_64` and run under Rosetta.
 
 ## Versioning
 

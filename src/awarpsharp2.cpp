@@ -21,7 +21,8 @@ enum ChromaWarping {
 };
 
 
-// The SSE2 code is only compiled on x86 (see meson.build). Other CPUs use the C code below.
+// The SIMD code is only compiled for its CPU (see meson.build): SSE2 on x86, NEON on arm64.
+// Other CPUs use the C code below. opt=True selects the SIMD kernels at runtime.
 #if defined(AWARPSHARP2_X86)
 extern void sobel_u8_sse2(const uint8_t *srcp, uint8_t *dstp, int stride, int width, int height, int thresh, int bits_per_sample);
 extern void blur_r6_u8_sse2(uint8_t *mask, uint8_t *temp, int stride, int width, int height);
@@ -32,6 +33,16 @@ extern void warp2_u8_sse2(const uint8_t *srcp, const uint8_t *edgep, uint8_t *ds
 extern void sobel_u16_sse2(const uint8_t *srcp, uint8_t *dstp, int stride, int width, int height, int thresh, int bits_per_sample);
 extern void blur_r6_u16_sse2(uint8_t *mask, uint8_t *temp, int stride, int width, int height);
 extern void blur_r2_u16_sse2(uint8_t *mask, uint8_t *temp, int stride, int width, int height);
+#elif defined(AWARPSHARP2_ARM)
+extern void sobel_u8_neon(const uint8_t *srcp, uint8_t *dstp, int stride, int width, int height, int thresh, int bits_per_sample);
+extern void blur_r6_u8_neon(uint8_t *mask, uint8_t *temp, int stride, int width, int height);
+extern void blur_r2_u8_neon(uint8_t *mask, uint8_t *temp, int stride, int width, int height);
+extern void warp0_u8_neon(const uint8_t *srcp, const uint8_t *edgep, uint8_t *dstp, int src_stride, int edge_stride, int dst_stride, int width, int height, int depth, int bits_per_sample);
+extern void warp2_u8_neon(const uint8_t *srcp, const uint8_t *edgep, uint8_t *dstp, int src_stride, int edge_stride, int dst_stride, int width, int height, int depth, int bits_per_sample);
+
+extern void sobel_u16_neon(const uint8_t *srcp, uint8_t *dstp, int stride, int width, int height, int thresh, int bits_per_sample);
+extern void blur_r6_u16_neon(uint8_t *mask, uint8_t *temp, int stride, int width, int height);
+extern void blur_r2_u16_neon(uint8_t *mask, uint8_t *temp, int stride, int width, int height);
 #endif
 
 
@@ -939,6 +950,20 @@ static void selectFunctions(AWarpSharp2Data *d, bool warp4=false) {
             else
                 d->warp = warp0_u8_sse2;
         }
+#elif defined(AWARPSHARP2_ARM)
+        if (d->opt) {
+            d->edge_mask = sobel_u8_neon;
+
+            if (d->blur_type == 0)
+                d->blur = blur_r6_u8_neon;
+            else
+                d->blur = blur_r2_u8_neon;
+
+            if (warp4)
+                d->warp = warp2_u8_neon;
+            else
+                d->warp = warp0_u8_neon;
+        }
 #endif
     } else if (fmt.bitsPerSample <= 16) {
         d->edge_mask = sobel_c<uint16_t>;
@@ -970,6 +995,15 @@ static void selectFunctions(AWarpSharp2Data *d, bool warp4=false) {
                 d->blur = blur_r6_u16_sse2;
             else
                 d->blur = blur_r2_u16_sse2;
+        }
+#elif defined(AWARPSHARP2_ARM)
+        if (d->opt) {
+            d->edge_mask = sobel_u16_neon;
+
+            if (d->blur_type == 0)
+                d->blur = blur_r6_u16_neon;
+            else
+                d->blur = blur_r2_u16_neon;
         }
 #endif
     }
@@ -1324,7 +1358,7 @@ static void VS_CC aWarpCreate(const VSMap *in, VSMap *out, void *userData, VSCor
 
 
 VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI *vspapi) {
-    vspapi->configPlugin("com.nodame.awarpsharp2", "warp", "Sharpen images by warping", VS_MAKE_VERSION(4, 1), VAPOURSYNTH_API_VERSION, 0, plugin);
+    vspapi->configPlugin("com.nodame.awarpsharp2", "warp", "Sharpen images by warping", VS_MAKE_VERSION(4, 2), VAPOURSYNTH_API_VERSION, 0, plugin);
 
     vspapi->registerFunction("AWarpSharp2",
             "clip:vnode;"

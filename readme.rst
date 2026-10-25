@@ -6,8 +6,8 @@ Avisynth filter (re)written by SEt.
 
 This fork uses the VapourSynth API 4 (VapourSynth R55 or newer) and
 builds wheels for Windows x64, Linux x86_64 and macOS arm64 (see
-`Fork changes`_). x86 uses SSE2 (``opt=True``), other CPUs
-(e.g. arm64) the C code, which gives the same results.
+`Fork changes`_). x86 uses SSE2 and arm64 NEON (``opt=True``); other
+CPUs use the C code, which gives the same results.
 
 The plugin registers the namespace ``warp`` with four functions:
 AWarpSharp2, ASobel, ABlur and AWarp.
@@ -105,9 +105,9 @@ Parameters:
         Default: all.
 
     *opt*
-        If True, the best functions supported by your CPU will be used.
-        If False, plain C++ functions will be used. On CPUs other than
-        x86 the C++ functions are always used.
+        If True, the best functions supported by your CPU will be used
+        (SSE2 on x86, NEON on arm64). If False, plain C++ functions will
+        be used. On other CPUs the C++ functions are always used.
 
         Default: True.
 
@@ -188,11 +188,17 @@ Tests (the plugin must be autoloaded, or pass its path)::
 Fork changes
 ============
 
-- VapourSynth API 4 (``VapourSynthPluginInit2``), plugin version 4.1;
+- VapourSynth API 4 (``VapourSynthPluginInit2``), plugin version 4.2;
   VapourSynth R55 or newer is required.
-- Builds and runs on arm64 (macOS): the C++ code is used there, with the
-  same results as the SSE2 code on x86 (checked by the tests for every
-  function in 8, 10 and 16 bit).
+- Builds and runs on arm64 (macOS): NEON versions of the SSE2 kernels
+  (Sobel, blur, 8 bit warp), with the same results as the SSE2 and the
+  C++ code (checked by the tests for every function in 8, 10 and 16 bit).
+- The last vector of the horizontal blur started inside the left edge
+  of planes 16..27 pixels wide (e.g. the chroma of a 36 pixel wide clip)
+  and overwrote it with the wrong formula, so ``opt=True`` differed from
+  the C++ code there; the SIMD warp wrote one byte past the end of each
+  row when the width was a multiple of 8. Both fixed in the SSE2 and the
+  NEON code.
 - The Meson build of the original enabled the SSE2 code under a
   misspelled define, so ``opt=True`` had no effect in Meson builds;
   the SSE2 code is now used on x86.

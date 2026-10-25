@@ -15,8 +15,8 @@ core = vs.core
 FAILURES = []
 
 # SHA-256 of all planes of frame 0 for each case below (pattern_clip(100, 60) unless the case
-# says otherwise). Every case runs with opt=True (SSE2 on x86) and opt=False (C code, the only
-# code on other CPUs) and both must give exactly this result.
+# says otherwise). Every case runs with opt=True (SSE2 on x86, NEON on arm64) and opt=False
+# (C code, the only code on other CPUs) and both must give exactly this result.
 REFERENCE = {
     "AWarpSharp2()": "fe24eb7fb17d231a0d1597f18ee3380eabb64c848847a1ac3dd2918b8910add0",
     "AWarpSharp2(thresh=200, blur=3, type=1, depth=[24, 12, 6], chroma=1)": "9444fe011a0d19d7be25fe95d83d588c0cfab5d4658376f3e0c39e55c0278b64",
@@ -36,6 +36,12 @@ REFERENCE = {
     "AWarp(depth=[8, 4, 4], chroma=1)": "7e0a2bd21d3c421e191b9d64bf76a8621f77896c3aecb595a62459b71dbb69fa",
     "AWarp() 4x clip": "2250f667fcffd34678642fe59fc1413f0ba61e4d3ad2b574ba0fd3cdd6bf6765",
     "AWarp() 4x clip YUV420P16": "55eb0f518512cda1dd64b22db9c1b96f227877793bb159b8ce1ae0d3701e6475",
+    # Narrow chroma planes (18 and 22 pixels wide, processed directly with chroma=1 or by ABlur):
+    # the last vector of the horizontal blur must not start inside the left edge.
+    "AWarpSharp2(chroma=1) 36x28": "2ad9183dac80c528aade8e8a4898bed43c5b7e14c42b67de1efeed25cdcb7050",
+    "AWarpSharp2(thresh=255, chroma=1) 44x28": "c18fd86d0d9c93a7358d79d8a7f2ae3139ce85f77a8569c69ec81c8bac3adb82",
+    "ABlur(type=1) 36x28": "147b3b8814b3b1bb6121a05f86723ba31d3c0c2f49aa05cff863130651d46fb0",
+    "ABlur(blur=1, type=0) 36x28 YUV420P16": "f213cf8821b025b8f808ad6bb839cfbe59e28b9606f99686c4135b842abcc817",
 }
 
 
@@ -115,6 +121,9 @@ def cases():
     src422 = pattern_clip(100, 60, vs.YUV422P8)
     gray = core.std.ShufflePlanes(src, 0, vs.GRAY)
     small = pattern_clip(64, 48)
+    narrow36 = pattern_clip(36, 28)
+    narrow44 = pattern_clip(44, 28)
+    narrow36_16 = pattern_clip(36, 28, vs.YUV420P16)
     src4 = core.resize.Point(src, 400, 240)
     src4_16 = core.resize.Point(src16, 400, 240)
 
@@ -142,6 +151,10 @@ def cases():
         "AWarp(depth=[8, 4, 4], chroma=1)": lambda opt: core.warp.AWarp(src, mask(src, opt), depth=[8, 4, 4], chroma=1, opt=opt),
         "AWarp() 4x clip": lambda opt: core.warp.AWarp(src4, mask(src, opt), opt=opt),
         "AWarp() 4x clip YUV420P16": lambda opt: core.warp.AWarp(src4_16, mask(src16, opt), opt=opt),
+        "AWarpSharp2(chroma=1) 36x28": lambda opt: core.warp.AWarpSharp2(narrow36, chroma=1, opt=opt),
+        "AWarpSharp2(thresh=255, chroma=1) 44x28": lambda opt: core.warp.AWarpSharp2(narrow44, thresh=255, chroma=1, opt=opt),
+        "ABlur(type=1) 36x28": lambda opt: core.warp.ABlur(narrow36, type=1, opt=opt),
+        "ABlur(blur=1, type=0) 36x28 YUV420P16": lambda opt: core.warp.ABlur(narrow36_16, blur=1, type=0, opt=opt),
     }
 
 

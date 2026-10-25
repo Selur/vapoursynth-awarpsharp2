@@ -3,6 +3,8 @@
 #include <cstring>
 #include <emmintrin.h>
 
+#include "warp_edge.h"
+
 
 #ifdef _MSC_VER
 #define FORCE_INLINE __forceinline
@@ -154,8 +156,11 @@ static void sobel_sse2(const uint8_t *srcp8, uint8_t *dstp8, int stride, int wid
         for (int x = 1; x < width_sse2 - 1; x += pixels_in_xmm)
             sobel_xmmword_sse2<PixelType>(srcp + x, dstp + x, stride, th, pixel_max);
 
-        if (width + 2 > width_sse2)
-            sobel_xmmword_sse2<PixelType>(srcp + width - pixels_in_xmm - 1, dstp + width - pixels_in_xmm - 1, stride, th, pixel_max);
+        // Last vector, clamped so a narrow row (width < pixels_in_xmm + 2) does not start before the row.
+        if (width + 2 > width_sse2) {
+            int x = std::max(width - pixels_in_xmm - 1, 1);
+            sobel_xmmword_sse2<PixelType>(srcp + x, dstp + x, stride, th, pixel_max);
+        }
 
         dstp[0] = dstp[1];
         dstp[width - 1] = dstp[width - 2];
@@ -338,8 +343,12 @@ static void blur_r6_sse2(uint8_t *mask8, uint8_t *temp8, int stride, int width, 
         for (int x = 6; x < width_sse2 - 6; x += pixels_in_xmm)
             blur_r6_h_middle_sse2<PixelType>(mask + x, temp + x);
 
-        if (width + 12 > width_sse2)
-            blur_r6_h_middle_sse2<PixelType>(mask + width - pixels_in_xmm - 6, temp + width - pixels_in_xmm - 6);
+        // Last middle vector, clamped to the first middle pixel: starting below 6 would overwrite
+        // the left edge computed above with the middle formula.
+        if (width + 12 > width_sse2) {
+            int x = std::max(width - pixels_in_xmm - 6, 6);
+            blur_r6_h_middle_sse2<PixelType>(mask + x, temp + x);
+        }
 
         blur_r6_h_right_sse2<PixelType>(mask + width - pixels_in_xmm, temp + width - pixels_in_xmm);
 
@@ -465,8 +474,11 @@ static void blur_r2_sse2(uint8_t *mask8, uint8_t *temp8, int stride, int width, 
         for (int x = 2; x < width_sse2 - 2; x += pixels_in_xmm)
             blur_r2_h_sse2<PixelType>(mask + x, temp + x);
 
-        if (width + 4 > width_sse2)
-            blur_r2_h_sse2<PixelType>(mask + width - pixels_in_xmm - 2, temp + width - pixels_in_xmm - 2);
+        // Last middle vector, clamped to the first middle pixel (see blur_r6).
+        if (width + 4 > width_sse2) {
+            int x = std::max(width - pixels_in_xmm - 2, 2);
+            blur_r2_h_sse2<PixelType>(mask + x, temp + x);
+        }
 
         avg1 = (mask[width - 3] + mask[width - 1] + 1) >> 1;
         avg2 = (mask[width - 4] + mask[width - 1] + 1) >> 1;
@@ -654,96 +666,6 @@ static FORCE_INLINE void warp_mmword_u8_sse2(const uint8_t *srcp, const uint8_t 
 }
 
 
-template <int SMAGL>
-static FORCE_INLINE void warp_edge_c(const uint8_t *srcp, const uint8_t *edgep, uint8_t *dstp, int src_stride, int edge_stride, int width, int height, int x, int y, int depth) {
-    int SMAG = 1 << SMAGL;
-
-    depth <<= 8;
-
-    const int x_limit_min = 0 * SMAG;
-    const int x_limit_max = (width - 1) * SMAG;
-
-    int y_limit_min = -y * 128;
-    int y_limit_max = (height - y) * 128 - 129; // (height - y - 1) * 128 - 1
-
-    // calculate displacement
-
-    int above = edgep[x - (y ? edge_stride : 0)];
-    int below = edgep[x + (y < height - 1 ? edge_stride : 0)];
-
-    int left = edgep[x - (x ? 1 : 0)];
-    int right = edgep[x + (x < width - 1 ? 1 : 0)];
-
-    int h = left - right;
-    int v = above - below;
-
-    h <<= 7;
-    v <<= 7;
-
-    h *= depth;
-    h >>= 16;
-    v *= depth;
-    v >>= 16;
-
-    v = std::max(v, y_limit_min);
-    v = std::min(v, y_limit_max);
-
-    int remainder_h = h;
-    int remainder_v = v;
-
-    if (SMAGL) {
-        remainder_h <<= SMAGL;
-        remainder_v <<= SMAGL;
-    }
-
-    remainder_h &= 127;
-    remainder_v &= 127;
-
-    h >>= 7 - SMAGL;
-    v >>= 7 - SMAGL;
-
-    h += x << SMAGL;
-    h = std::min(std::max(h, -32768), 32767); // likely pointless
-
-    bool remainder_needed = (x_limit_max > h) && !(x_limit_min > h);
-    if (!remainder_needed)
-        remainder_h = 0; // probably correct
-
-    h = std::min(h, x_limit_max);
-    h = std::max(h, x_limit_min);
-
-    // h and v contain the displacement now.
-
-    int s00 = srcp[v * src_stride + h];
-    int s01 = srcp[v * src_stride + h + 1];
-    int s10 = srcp[(v + 1) * src_stride + h];
-    int s11 = srcp[(v + 1) * src_stride + h + 1];
-
-    int s0 = s00 * (128 - remainder_h);
-    int s1 = s10 * (128 - remainder_h);
-
-    s0 += s01 * remainder_h;
-    s1 += s11 * remainder_h;
-
-    s0 += 64;
-    s1 += 64;
-
-    s0 >>= 7;
-    s1 >>= 7;
-
-    s0 *= 128 - remainder_v;
-    s1 *= remainder_v;
-
-    int s = s0 + s1;
-
-    s += 64;
-
-    s >>= 7;
-
-    dstp[x] = std::min(std::max(s, 0), 255);
-}
-
-
 template <int SMAGL> // 0 or 2
 static void warp_u8_sse2(const uint8_t *srcp, const uint8_t *edgep, uint8_t *dstp, int src_stride, int edge_stride, int dst_stride, int width, int height, int depth_scalar) {
     int SMAG = 1 << SMAGL;
@@ -772,9 +694,6 @@ static void warp_u8_sse2(const uint8_t *srcp, const uint8_t *edgep, uint8_t *dst
         (width - 8) * SMAG
     );
 
-    int width_sse2 = (width & ~7) + 2;
-    if (width_sse2 > dst_stride)
-        width_sse2 -= 8;
 
     __m128i zero = _mm_setzero_si128();
 
@@ -798,11 +717,15 @@ static void warp_u8_sse2(const uint8_t *srcp, const uint8_t *edgep, uint8_t *dst
 
         warp_edge_c<SMAGL>(srcp, edgep, dstp, src_stride, edge_stride, width, height, 0, y, depth_scalar);
 
-        for (int x = 1; x < width_sse2 - 1; x += 8)
+        // Full blocks of 8 pixels inside [1, width - 2], then one more block ending at width - 2
+        // if pixels are left (a narrow row still starts at 1). Nothing is written past the row.
+        int x = 1;
+        for ( ; x <= width - 9; x += 8)
             warp_mmword_u8_sse2<SMAGL>(srcp, edgep, dstp, src_stride, edge_stride, height, x, y, depth, zero, x_limit_min, x_limit_max, y_limit_min, y_limit_max, word_64, word_127, word_128, word_255, one_stride);
-
-        if (width + 2 > width_sse2)
-            warp_mmword_u8_sse2<SMAGL>(srcp, edgep, dstp, src_stride, edge_stride, height, width - 9, y, depth, zero, x_limit_min, x_limit_max, y_limit_min, y_limit_max, word_64, word_127, word_128, word_255, one_stride);
+        if (x < width - 1) {
+            x = std::max(width - 9, 1);
+            warp_mmword_u8_sse2<SMAGL>(srcp, edgep, dstp, src_stride, edge_stride, height, x, y, depth, zero, x_limit_min, x_limit_max, y_limit_min, y_limit_max, word_64, word_127, word_128, word_255, one_stride);
+        }
 
         warp_edge_c<SMAGL>(srcp, edgep, dstp, src_stride, edge_stride, width, height, width - 1, y, depth_scalar);
 
