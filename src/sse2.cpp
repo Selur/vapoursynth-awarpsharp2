@@ -4,7 +4,7 @@
 #include <emmintrin.h>
 
 
-#ifdef _WIN32
+#ifdef _MSC_VER
 #define FORCE_INLINE __forceinline
 #else
 #define FORCE_INLINE inline __attribute__((always_inline))
@@ -43,7 +43,7 @@ static FORCE_INLINE __m128i mm_max_epu(const __m128i &a, const __m128i &b) {
     if (sizeof(PixelType) == 1)
         return _mm_max_epu8(a, b);
     else {
-        __m128i word_32768 = _mm_set1_epi16(32768);
+        __m128i word_32768 = _mm_set1_epi16(-32768);
 
         __m128i a_minus = _mm_sub_epi16(a, word_32768);
         __m128i b_minus = _mm_sub_epi16(b, word_32768);
@@ -58,7 +58,7 @@ static FORCE_INLINE __m128i mm_min_epu(const __m128i &a, const __m128i &b) {
     if (sizeof(PixelType) == 1)
         return _mm_min_epu8(a, b);
     else {
-        __m128i word_32768 = _mm_set1_epi16(32768);
+        __m128i word_32768 = _mm_set1_epi16(-32768);
 
         __m128i a_minus = _mm_sub_epi16(a, word_32768);
         __m128i b_minus = _mm_sub_epi16(b, word_32768);
