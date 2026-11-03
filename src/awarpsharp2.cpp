@@ -21,9 +21,75 @@ enum ChromaWarping {
 };
 
 
-// The SIMD code is only compiled for its CPU (see meson.build): SSE2 on x86, NEON on arm64.
-// Other CPUs use the C code below. opt=True selects the SIMD kernels at runtime.
+// Values of the opt argument.
+enum OptLevel {
+    OptC,    // C code only
+    OptAuto, // the fastest code the CPU supports
+    OptSSE2, // SSE2 at most
+    OptAVX2, // AVX2 at most
+};
+
+
+// The SIMD code is only compiled for its CPU (see meson.build): SSE2 and AVX2 on x86, NEON on
+// arm64. Other CPUs use the C code below. opt selects the kernels at runtime; AVX2 is only used
+// when the CPU and the operating system support it, and on arm64 every opt but 0 means NEON.
 #if defined(AWARPSHARP2_X86)
+#if defined(_MSC_VER)
+#include <intrin.h>
+#else
+#include <cpuid.h>
+#endif
+
+static bool cpuHasAVX2() {
+    unsigned regs1[4] = { 0 }, regs7[4] = { 0 };
+#if defined(_MSC_VER)
+    int r[4];
+    __cpuid(r, 0);
+    unsigned max_leaf = (unsigned)r[0];
+    __cpuid(r, 1);
+    for (int i = 0; i < 4; i++)
+        regs1[i] = (unsigned)r[i];
+    if (max_leaf >= 7) {
+        __cpuidex(r, 7, 0);
+        for (int i = 0; i < 4; i++)
+            regs7[i] = (unsigned)r[i];
+    }
+#else
+    unsigned max_leaf = __get_cpuid_max(0, nullptr);
+    __cpuid(1, regs1[0], regs1[1], regs1[2], regs1[3]);
+    if (max_leaf >= 7)
+        __cpuid_count(7, 0, regs7[0], regs7[1], regs7[2], regs7[3]);
+#endif
+
+    bool osxsave = regs1[2] & (1u << 27);
+    bool avx = regs1[2] & (1u << 28);
+    bool avx2 = regs7[1] & (1u << 5);
+    if (!osxsave || !avx || !avx2)
+        return false;
+
+    // The operating system must save the SSE and AVX registers (XCR0 bits 1 and 2).
+#if defined(_MSC_VER)
+    unsigned long long xcr0 = _xgetbv(0);
+#else
+    unsigned eax, edx;
+    __asm__ volatile ("xgetbv" : "=a"(eax), "=d"(edx) : "c"(0));
+    unsigned long long xcr0 = ((unsigned long long)edx << 32) | eax;
+#endif
+    return (xcr0 & 6) == 6;
+}
+
+extern void sobel_u8_avx2(const uint8_t *srcp, uint8_t *dstp, int stride, int width, int height, int thresh, int bits_per_sample);
+extern void blur_r6_u8_avx2(uint8_t *mask, uint8_t *temp, int stride, int width, int height);
+extern void blur_r2_u8_avx2(uint8_t *mask, uint8_t *temp, int stride, int width, int height);
+extern void warp0_u8_avx2(const uint8_t *srcp, const uint8_t *edgep, uint8_t *dstp, int src_stride, int edge_stride, int dst_stride, int width, int height, int depth, int bits_per_sample);
+extern void warp2_u8_avx2(const uint8_t *srcp, const uint8_t *edgep, uint8_t *dstp, int src_stride, int edge_stride, int dst_stride, int width, int height, int depth, int bits_per_sample);
+
+extern void sobel_u16_avx2(const uint8_t *srcp, uint8_t *dstp, int stride, int width, int height, int thresh, int bits_per_sample);
+extern void blur_r6_u16_avx2(uint8_t *mask, uint8_t *temp, int stride, int width, int height);
+extern void blur_r2_u16_avx2(uint8_t *mask, uint8_t *temp, int stride, int width, int height);
+extern void warp0_u16_avx2(const uint8_t *srcp, const uint8_t *edgep, uint8_t *dstp, int src_stride, int edge_stride, int dst_stride, int width, int height, int depth, int bits_per_sample);
+extern void warp2_u16_avx2(const uint8_t *srcp, const uint8_t *edgep, uint8_t *dstp, int src_stride, int edge_stride, int dst_stride, int width, int height, int depth, int bits_per_sample);
+
 extern void sobel_u8_sse2(const uint8_t *srcp, uint8_t *dstp, int stride, int width, int height, int thresh, int bits_per_sample);
 extern void blur_r6_u8_sse2(uint8_t *mask, uint8_t *temp, int stride, int width, int height);
 extern void blur_r2_u8_sse2(uint8_t *mask, uint8_t *temp, int stride, int width, int height);
@@ -584,6 +650,19 @@ static void warp_c(const uint8_t *srcp8, const uint8_t *edgep8, uint8_t *dstp8, 
 }
 
 
+#if defined(AWARPSHARP2_X86)
+// For planes too narrow for the AVX2 code.
+void warp0_u16_c(const uint8_t *srcp, const uint8_t *edgep, uint8_t *dstp, int src_stride, int edge_stride, int dst_stride, int width, int height, int depth, int bits_per_sample) {
+    warp_c<0, uint16_t>(srcp, edgep, dstp, src_stride, edge_stride, dst_stride, width, height, depth, bits_per_sample);
+}
+
+
+void warp2_u16_c(const uint8_t *srcp, const uint8_t *edgep, uint8_t *dstp, int src_stride, int edge_stride, int dst_stride, int width, int height, int depth, int bits_per_sample) {
+    warp_c<2, uint16_t>(srcp, edgep, dstp, src_stride, edge_stride, dst_stride, width, height, depth, bits_per_sample);
+}
+#endif
+
+
 typedef struct AWarpSharp2Data {
     VSNode *node;
     VSNode *mask;
@@ -914,6 +993,11 @@ static void VS_CC aWarpSharp2Free(void *instanceData, VSCore *core, const VSAPI 
 static void selectFunctions(AWarpSharp2Data *d, bool warp4=false) {
     const VSVideoFormat &fmt = d->vi->format;
 
+#if defined(AWARPSHARP2_X86)
+    bool sse2 = d->opt != OptC;
+    bool avx2 = (d->opt == OptAuto || d->opt == OptAVX2) && cpuHasAVX2();
+#endif
+
     if (fmt.bitsPerSample == 8) {
         d->edge_mask = sobel_c<uint8_t>;
 
@@ -937,7 +1021,7 @@ static void selectFunctions(AWarpSharp2Data *d, bool warp4=false) {
             d->warp = warp_c<0, uint8_t>;
 
 #if defined(AWARPSHARP2_X86)
-        if (d->opt) {
+        if (sse2) {
             d->edge_mask = sobel_u8_sse2;
 
             if (d->blur_type == 0)
@@ -949,6 +1033,20 @@ static void selectFunctions(AWarpSharp2Data *d, bool warp4=false) {
                 d->warp = warp2_u8_sse2;
             else
                 d->warp = warp0_u8_sse2;
+        }
+
+        if (avx2) {
+            d->edge_mask = sobel_u8_avx2;
+
+            if (d->blur_type == 0)
+                d->blur = blur_r6_u8_avx2;
+            else
+                d->blur = blur_r2_u8_avx2;
+
+            if (warp4)
+                d->warp = warp2_u8_avx2;
+            else
+                d->warp = warp0_u8_avx2;
         }
 #elif defined(AWARPSHARP2_ARM)
         if (d->opt) {
@@ -988,13 +1086,27 @@ static void selectFunctions(AWarpSharp2Data *d, bool warp4=false) {
             d->warp = warp_c<0, uint16_t>;
 
 #if defined(AWARPSHARP2_X86)
-        if (d->opt) {
+        if (sse2) {
             d->edge_mask = sobel_u16_sse2;
 
             if (d->blur_type == 0)
                 d->blur = blur_r6_u16_sse2;
             else
                 d->blur = blur_r2_u16_sse2;
+        }
+
+        if (avx2) {
+            d->edge_mask = sobel_u16_avx2;
+
+            if (d->blur_type == 0)
+                d->blur = blur_r6_u16_avx2;
+            else
+                d->blur = blur_r2_u16_avx2;
+
+            if (warp4)
+                d->warp = warp2_u16_avx2;
+            else
+                d->warp = warp0_u16_avx2;
         }
 #elif defined(AWARPSHARP2_ARM)
         if (d->opt) {
@@ -1120,12 +1232,19 @@ static bool parseChroma(const VSMap *in, AWarpSharp2Data *d, const char *filter_
 }
 
 
-static void parseOpt(const VSMap *in, AWarpSharp2Data *d, const VSAPI *vsapi) {
+static bool parseOpt(const VSMap *in, AWarpSharp2Data *d, const char *filter_name, VSMap *out, const VSAPI *vsapi) {
     int err;
 
-    d->opt = !!vsapi->mapGetInt(in, "opt", 0, &err);
+    d->opt = vsapi->mapGetIntSaturated(in, "opt", 0, &err);
     if (err)
-        d->opt = 1;
+        d->opt = OptAuto;
+
+    if (d->opt < OptC || d->opt > OptAVX2) {
+        setError(out, filter_name, "opt must be between 0 and 3 (inclusive).", vsapi);
+        return false;
+    }
+
+    return true;
 }
 
 
@@ -1155,7 +1274,8 @@ static void VS_CC aWarpSharp2Create(const VSMap *in, VSMap *out, void *userData,
     if (!parseChroma(in, &d, filter_name, out, vsapi))
         return;
 
-    parseOpt(in, &d, vsapi);
+    if (!parseOpt(in, &d, filter_name, out, vsapi))
+        return;
 
     if (d.thresh < 0 || d.thresh > 255) {
         setError(out, filter_name, "thresh must be between 0 and 255 (inclusive).", vsapi);
@@ -1211,7 +1331,8 @@ static void VS_CC aSobelCreate(const VSMap *in, VSMap *out, void *userData, VSCo
     if (err)
         d.thresh = 128;
 
-    parseOpt(in, &d, vsapi);
+    if (!parseOpt(in, &d, filter_name, out, vsapi))
+        return;
 
     if (d.thresh < 0 || d.thresh > 255) {
         setError(out, filter_name, "thresh must be between 0 and 255 (inclusive).", vsapi);
@@ -1261,7 +1382,8 @@ static void VS_CC aBlurCreate(const VSMap *in, VSMap *out, void *userData, VSCor
     if (err)
         d.blur_level = d.blur_type ? 3 : 2;
 
-    parseOpt(in, &d, vsapi);
+    if (!parseOpt(in, &d, filter_name, out, vsapi))
+        return;
 
     if (d.blur_level < 0) {
         setError(out, filter_name, "blur must be at least 0.", vsapi);
@@ -1309,7 +1431,8 @@ static void VS_CC aWarpCreate(const VSMap *in, VSMap *out, void *userData, VSCor
     if (!parseChroma(in, &d, filter_name, out, vsapi))
         return;
 
-    parseOpt(in, &d, vsapi);
+    if (!parseOpt(in, &d, filter_name, out, vsapi))
+        return;
 
 
     d.node = vsapi->mapGetNode(in, "clip", 0, nullptr);
@@ -1358,7 +1481,7 @@ static void VS_CC aWarpCreate(const VSMap *in, VSMap *out, void *userData, VSCor
 
 
 VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI *vspapi) {
-    vspapi->configPlugin("com.nodame.awarpsharp2", "warp", "Sharpen images by warping", VS_MAKE_VERSION(4, 2), VAPOURSYNTH_API_VERSION, 0, plugin);
+    vspapi->configPlugin("com.nodame.awarpsharp2", "warp", "Sharpen images by warping", VS_MAKE_VERSION(4, 3), VAPOURSYNTH_API_VERSION, 0, plugin);
 
     vspapi->registerFunction("AWarpSharp2",
             "clip:vnode;"

@@ -10,9 +10,16 @@ with chroma subsampling up to 2, not RGB. Fork of dubhater's plugin, ported to A
 
 - `src/awarpsharp2.cpp`: C++ template kernels (`sobel_c`, `blur_r6_c`, `blur_r2_c`,
   `bilinear_downscale_*_c`, `warp_c<SMAGL, PixelType>`) followed by the API 4 glue (one
-  `AWarpSharp2Data` struct for all four filters, `selectFunctions()` picks C, SSE2 or NEON kernels).
+  `AWarpSharp2Data` struct for all four filters, `selectFunctions()` picks C, SSE2, AVX2 or NEON
+  kernels by `opt`: 0 C, 1 fastest supported (default), 2 SSE2 at most, 3 AVX2 at most; on arm64
+  every opt but 0 means NEON).
 - `src/sse2.cpp`: SSE2 kernels (sobel/blur for 8 and 16 bit, warp for 8 bit only). Compiled only
   on x86 (`AWARPSHARP2_X86`, set by `meson.build`).
+- `src/avx2.cpp`: AVX2 ports of the SSE2 kernels plus a 16 bit warp (gathers); x86 only, built as a
+  separate static library with `-mavx2` / `/arch:AVX2` and called only after `cpuHasAVX2()`
+  (CPUID + XGETBV). It must not use inline std functions or `warp_edge.h` (an AVX2 COMDAT copy
+  could be picked for the SSE2 code), so it has its own `warp_pixel_c`. Planes narrower than two
+  vectors fall back to SSE2 (or C for the 16 bit warp). Same loop bounds as the SSE2 code.
 - `src/neon.cpp`: the same kernels for AArch64 (`AWARPSHARP2_ARM`), a lane-by-lane port of the
   SSE2 code (`Vec<PixelType>` traits for the 8/16 bit vector ops; the warp gathers its source
   pixels with scalar loads). Same loop bounds and edge handling as the SSE2 code, so the two can
@@ -28,8 +35,8 @@ with chroma subsampling up to 2, not RGB. Fork of dubhater's plugin, ported to A
   exact identity there; AWarp with a 4x clip leaves unprocessed planes uninitialised.
 - `include/vapoursynth/`: vendored R55 API 4 headers, used when pkg-config finds no `vapoursynth`.
 - `test/test_awarpsharp2.py`: functional tests (SHA-256 references for every function in 8, 10
-  and 16 bit, including 36 and 44 pixel wide clips whose chroma hits the last-vector cases; each
-  case must agree between `opt=True` and `opt=False`; argument errors).
+  and 16 bit, including 36 and 44 pixel wide clips whose chroma hits the last-vector cases and
+  250x90 clips that exercise the AVX2 paths; each case must agree for opt 0..3; argument errors).
   Run with `python test/test_awarpsharp2.py build/awarpsharp2.dll`, or without the path when the
   wheel is installed. Changing pixel output changes the digests: regenerate them deliberately
   (set an entry to `None`, the test prints the new value).

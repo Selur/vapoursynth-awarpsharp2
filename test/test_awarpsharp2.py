@@ -15,8 +15,10 @@ core = vs.core
 FAILURES = []
 
 # SHA-256 of all planes of frame 0 for each case below (pattern_clip(100, 60) unless the case
-# says otherwise). Every case runs with opt=True (SSE2 on x86, NEON on arm64) and opt=False
-# (C code, the only code on other CPUs) and both must give exactly this result.
+# says otherwise). Every case runs with every opt level (0: C code, the only code on other CPUs;
+# 1: auto; 2: SSE2; 3: AVX2, or SSE2 on CPUs without AVX2; on arm64 1..3 are NEON) and all must
+# give exactly this result. The AVX2 code falls back to SSE2 or C for planes narrower than two
+# vectors, so the wide cases make sure it is used for every plane and kernel.
 REFERENCE = {
     "AWarpSharp2()": "fe24eb7fb17d231a0d1597f18ee3380eabb64c848847a1ac3dd2918b8910add0",
     "AWarpSharp2(thresh=200, blur=3, type=1, depth=[24, 12, 6], chroma=1)": "9444fe011a0d19d7be25fe95d83d588c0cfab5d4658376f3e0c39e55c0278b64",
@@ -42,7 +44,15 @@ REFERENCE = {
     "AWarpSharp2(thresh=255, chroma=1) 44x28": "c18fd86d0d9c93a7358d79d8a7f2ae3139ce85f77a8569c69ec81c8bac3adb82",
     "ABlur(type=1) 36x28": "147b3b8814b3b1bb6121a05f86723ba31d3c0c2f49aa05cff863130651d46fb0",
     "ABlur(blur=1, type=0) 36x28 YUV420P16": "f213cf8821b025b8f808ad6bb839cfbe59e28b9606f99686c4135b842abcc817",
+    "AWarpSharp2() 250x90": "f34bbafdc47804cb773567ab79974804ac76307e81000aedb5eb0e03e83b7bbe",
+    "AWarpSharp2(blur=3, type=1, chroma=1) 250x90": "fdd5474023ecef7a7d57dca57b4afa2853f5564a57b02e047c226bf2c32abe40",
+    "AWarpSharp2(depth=[-40, 20]) 250x90 YUV420P16": "5dd8d4926a29a7dca613cf8a8c304d8649ee0774c6a025762e9fd8fc80d55aff",
+    "AWarpSharp2(thresh=90, blur=2, type=1, chroma=1) 250x90 YUV420P12": "f89d180570d9dca2998df9c530444c0714ba6e9e75fc7e42d3ae59e55b50209c",
+    "AWarp() 4x clip 250x90": "b792ea9933c4f1337f7b3b6663e330d7e31f18f43d64cef91b8c890501561c27",
+    "AWarp() 4x clip 250x90 YUV420P10": "a9778030d194d8b43c449128ddd62e3f55e419e5ad034e79190d348afcd5f62e",
 }
+
+OPT_LEVELS = (0, 1, 2, 3)
 
 
 def check(cond, msg):
@@ -126,6 +136,12 @@ def cases():
     narrow36_16 = pattern_clip(36, 28, vs.YUV420P16)
     src4 = core.resize.Point(src, 400, 240)
     src4_16 = core.resize.Point(src16, 400, 240)
+    wide = pattern_clip(250, 90)
+    wide16 = pattern_clip(250, 90, vs.YUV420P16)
+    wide12 = pattern_clip(250, 90, vs.YUV420P12)
+    wide10 = pattern_clip(250, 90, vs.YUV420P10)
+    wide4 = core.resize.Point(wide, 1000, 360)
+    wide4_10 = core.resize.Point(wide10, 1000, 360)
 
     def mask(clip, opt):
         return core.warp.ABlur(core.warp.ASobel(clip, opt=opt), opt=opt)
@@ -155,6 +171,14 @@ def cases():
         "AWarpSharp2(thresh=255, chroma=1) 44x28": lambda opt: core.warp.AWarpSharp2(narrow44, thresh=255, chroma=1, opt=opt),
         "ABlur(type=1) 36x28": lambda opt: core.warp.ABlur(narrow36, type=1, opt=opt),
         "ABlur(blur=1, type=0) 36x28 YUV420P16": lambda opt: core.warp.ABlur(narrow36_16, blur=1, type=0, opt=opt),
+        "AWarpSharp2() 250x90": lambda opt: core.warp.AWarpSharp2(wide, opt=opt),
+        "AWarpSharp2(blur=3, type=1, chroma=1) 250x90":
+            lambda opt: core.warp.AWarpSharp2(wide, blur=3, type=1, chroma=1, opt=opt),
+        "AWarpSharp2(depth=[-40, 20]) 250x90 YUV420P16": lambda opt: core.warp.AWarpSharp2(wide16, depth=[-40, 20], opt=opt),
+        "AWarpSharp2(thresh=90, blur=2, type=1, chroma=1) 250x90 YUV420P12":
+            lambda opt: core.warp.AWarpSharp2(wide12, thresh=90, blur=2, type=1, chroma=1, opt=opt),
+        "AWarp() 4x clip 250x90": lambda opt: core.warp.AWarp(wide4, mask(wide, opt), opt=opt),
+        "AWarp() 4x clip 250x90 YUV420P10": lambda opt: core.warp.AWarp(wide4_10, mask(wide10, opt), opt=opt),
     }
 
 
@@ -203,14 +227,14 @@ def main():
     check(aw.num_frames == 3 and digest(aw, 2) == digest(aw, 0), "AWarp with a mask longer than the clip")
 
     for name, make in cases().items():
-        d_opt = digest(make(True))
-        d_c = digest(make(False))
-        check(d_opt == d_c, "opt=True and opt=False agree: %s" % name)
+        digests = [digest(make(opt)) for opt in OPT_LEVELS]
+        check(len(set(digests)) == 1, "opt=%s agree: %s" % ("/".join(map(str, OPT_LEVELS)), name))
+        check(digest(make(True)) == digests[1], "opt=True is opt=1: %s" % name)
         expected = REFERENCE.get(name)
         if expected is None:
-            print("info reference %s: %s" % (name, d_opt))
+            print("info reference %s: %s" % (name, digests[0]))
         else:
-            check(d_opt == expected, "reference result: %s" % name)
+            check(digests[0] == expected, "reference result: %s" % name)
 
     expect_error(lambda: core.warp.AWarpSharp2(src, thresh=256), "thresh 256 rejected", "thresh")
     expect_error(lambda: core.warp.AWarpSharp2(src, blur=-1), "blur -1 rejected", "blur")
@@ -224,6 +248,8 @@ def main():
     expect_error(lambda: core.warp.AWarpSharp2(src.resize.Point(format=vs.RGB24, matrix_in_s="709")), "RGB rejected", "RGB")
     expect_error(lambda: core.warp.AWarpSharp2(src.resize.Point(format=vs.YUV420PS)), "float rejected", "integer")
     expect_error(lambda: core.warp.AWarpSharp2(src.resize.Point(format=vs.YUV411P8)), "4:1:1 rejected", "subsampling")
+    expect_error(lambda: core.warp.AWarpSharp2(src, opt=4), "opt 4 rejected", "opt")
+    expect_error(lambda: core.warp.ABlur(src, opt=-1), "ABlur opt -1 rejected", "opt")
     expect_error(lambda: core.warp.ASobel(src, thresh=-1), "ASobel thresh -1 rejected", "thresh")
     expect_error(lambda: core.warp.ABlur(src, type=-1), "ABlur type -1 rejected", "type")
     expect_error(lambda: core.warp.AWarp(src, edge.resize.Point(format=vs.YUV420P16)), "AWarp format mismatch rejected", "same format")

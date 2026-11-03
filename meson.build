@@ -1,7 +1,7 @@
 project('AWarpSharp2', 'cpp',
   default_options : ['buildtype=release', 'b_ndebug=if-release', 'cpp_std=c++14'],
   meson_version : '>=0.64.0',
-  version : '4.2.0'
+  version : '4.3.0'
 )
 
 sources = ['src/awarpsharp2.cpp']
@@ -20,14 +20,22 @@ if not msvc
   add_project_arguments('-Wall', '-Wextra', '-Wshadow', language : 'cpp')
 endif
 
-# x86 gets the SSE2 code and arm64 the NEON code next to the C code (opt=True selects it at
-# runtime); every other CPU builds the C code only.
+# x86 gets the SSE2 and AVX2 code (AVX2 only when the CPU supports it) and arm64 the NEON code
+# next to the C code (opt selects it at runtime); every other CPU builds the C code only.
+link_with = []
 if host_machine.cpu_family() in ['x86', 'x86_64']
   add_project_arguments('-DAWARPSHARP2_X86=1', language : 'cpp')
   sources += 'src/sse2.cpp'
   if not msvc
     add_project_arguments('-mfpmath=sse', '-msse2', language : 'cpp')
   endif
+
+  # Only this file is compiled for AVX2, the rest must run on any SSE2 CPU.
+  link_with += static_library('avx2', 'src/avx2.cpp',
+    cpp_args : msvc ? ['/arch:AVX2'] : ['-mavx2'],
+    gnu_symbol_visibility : 'hidden',
+    pic : true
+  )
 elif host_machine.cpu_family() == 'aarch64'
   # NEON is part of the AArch64 base ISA, no extra compiler flag needed.
   add_project_arguments('-DAWARPSHARP2_ARM=1', language : 'cpp')
@@ -59,6 +67,7 @@ endif
 
 shared_module('awarpsharp2', sources,
   dependencies : vapoursynth_dep,
+  link_with : link_with,
   install : true,
   install_dir : install_dir,
   gnu_symbol_visibility : 'hidden',
