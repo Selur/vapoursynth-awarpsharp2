@@ -1,7 +1,7 @@
 project('AWarpSharp2', 'cpp',
   default_options : ['buildtype=release', 'b_ndebug=if-release', 'cpp_std=c++14'],
   meson_version : '>=0.64.0',
-  version : '4.3.0'
+  version : '4.3.1'
 )
 
 sources = ['src/awarpsharp2.cpp']
